@@ -57,7 +57,7 @@ func (s *Server) ListenAndServe() {
 				tlsConfig := tls.Config{
 					RootCAs: s.Roots,
 					Certificates: []tls.Certificate{
-						tls.Certificate{
+						{
 							Certificate: [][]byte{cert},
 							PrivateKey:  certKey,
 						},
