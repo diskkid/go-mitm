@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"log"
 	"math/big"
 	"net"
@@ -38,62 +39,75 @@ func (s *Server) ListenAndServe() {
 			log.Fatal(err)
 		}
 
-		go func() {
-			req, err := http.ReadRequest(bufio.NewReader(conn))
-			if err != nil {
-				log.Printf("Failed to read request: %v\n", err)
-				return
-			}
-
-			if req.Method == "CONNECT" {
-				res := http.Response{ProtoMajor: 1, StatusCode: 200}
-				res.Write(conn)
-
-				cert, certKey, err := createCertificate(s.CaCert, s.CaKey, req.URL.Hostname())
-				if err != nil {
-					log.Fatalf("Failed to create certificate: %v\n", err)
-				}
-
-				tlsConfig := tls.Config{
-					RootCAs: s.Roots,
-					Certificates: []tls.Certificate{
-						{
-							Certificate: [][]byte{cert},
-							PrivateKey:  certKey,
-						},
-					},
-				}
-
-				tlsConn := tls.Server(conn, &tlsConfig)
-				if err := tlsConn.Handshake(); err != nil {
-					log.Printf("Failed to handshake: %v\n", err)
-					return
-				}
-
-				req, err = http.ReadRequest(bufio.NewReader(tlsConn))
-				if err != nil {
-					log.Printf("Failed to read request: %v\n", err)
-					return
-				}
-
-				req.URL.Scheme = "https"
-				req.URL.Host = req.Host
-
-				conn = tlsConn
-			}
-
-			c := http.Client{}
-			req.RequestURI = ""
-			res, err := c.Do(req)
-			if err != nil {
-				log.Printf("Failed to send a request to %s%s: %v\n", req.Host, req.RequestURI, err)
-				return
-			}
-
-			res.Write(conn)
-			conn.Close()
-		}()
+		go s.handleRequest(conn)
 	}
+}
+
+func (s *Server) handleRequest(conn net.Conn) {
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("%v", err)
+		}
+	}()
+
+	req, err := http.ReadRequest(bufio.NewReader(conn))
+	if err != nil {
+		log.Printf("Failed to read request: %v\n", err)
+		return
+	}
+
+	if req.Method == "CONNECT" {
+		req, conn, err = s.handleConnect(conn, req)
+		if err != nil {
+			log.Printf("%v", err)
+			return
+		}
+	}
+
+	c := http.Client{}
+	req.RequestURI = ""
+	res, err := c.Do(req)
+	if err != nil {
+		log.Printf("Failed to send a request to %s%s: %v\n", req.Host, req.RequestURI, err)
+		return
+	}
+
+	res.Write(conn)
+}
+
+func (s *Server) handleConnect(conn net.Conn, req *http.Request) (*http.Request, net.Conn, error) {
+	res := http.Response{ProtoMajor: 1, StatusCode: 200}
+	res.Write(conn)
+
+	cert, certKey, err := createCertificate(s.CaCert, s.CaKey, req.URL.Hostname())
+	if err != nil {
+		log.Fatalf("Failed to create certificate: %v\n", err)
+	}
+
+	tlsConfig := tls.Config{
+		RootCAs: s.Roots,
+		Certificates: []tls.Certificate{
+			{
+				Certificate: [][]byte{cert},
+				PrivateKey:  certKey,
+			},
+		},
+	}
+
+	tlsConn := tls.Server(conn, &tlsConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, nil, fmt.Errorf("Failed to handshake: %v\n", err)
+	}
+
+	conReq, err := http.ReadRequest(bufio.NewReader(tlsConn))
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to read request: %v\n", err)
+	}
+
+	conReq.URL.Scheme = "https"
+	conReq.URL.Host = conReq.Host
+
+	return conReq, tlsConn, nil
 }
 
 func createCertificate(ca *x509.Certificate, caKey *rsa.PrivateKey, host string) ([]byte, *rsa.PrivateKey, error) {
